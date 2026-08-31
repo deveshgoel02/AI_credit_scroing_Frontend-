@@ -2,29 +2,33 @@ import axios from 'axios'
 
 const RAW_API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
-// Normalise the configured base URL before axios ever sees it.
-//
-// VITE_API_URL is pasted by hand into the Vercel dashboard, and the two most
-// common mistakes both produce a 404 that looks like a backend problem:
-//   "https://host.onrender.com/"     -> ".../api/predict"      (fine, but noisy)
-//   "https://host.onrender.com/api"  -> ".../api/api/predict"  (404 Not Found)
-// Stripping trailing slashes and a trailing "/api" makes all of these work.
+// VITE_API_URL is pasted by hand into Vercel, so tolerate the common variants:
+// a trailing slash, or a trailing "/api" (which would build .../api/api/predict).
 const API_URL = RAW_API_URL.trim()
   .replace(/\/+$/, '')
   .replace(/\/api$/, '')
 
-if (import.meta.env.PROD && /localhost|127\.0\.0\.1/.test(API_URL)) {
-  // A production build pointing at localhost means VITE_API_URL was never set
-  // in the Vercel project (or was added without a redeploy afterwards).
-  console.error(
-    '[CrediAI] VITE_API_URL is not set for this build. API calls will fail. ' +
-      'Set it in Vercel > Settings > Environment Variables, then redeploy.',
-  )
+// Bump this string whenever you change this file. Log it on boot so you can
+// tell from the browser console whether the deployed bundle is actually new.
+const API_CLIENT_VERSION = 'v3-cold-start'
+
+if (import.meta.env.PROD) {
+  console.info(`[CrediAI] api client ${API_CLIENT_VERSION} -> ${API_URL}`)
+  if (/localhost|127\.0\.0\.1/.test(API_URL)) {
+    console.error(
+      '[CrediAI] VITE_API_URL is not set for this build. Set it in Vercel > ' +
+        'Settings > Environment Variables, then trigger a new deployment.',
+    )
+  }
 }
+
+// Render free-tier instances sleep after ~15 min idle. Waking one and importing
+// pandas/xgboost/shap can take 60-90s, so the first request needs a long fuse.
+const COLD_START_TIMEOUT = 90000
 
 const client = axios.create({
   baseURL: API_URL,
-  timeout: 60000, // Render free tier cold starts can take ~50s on the first request.
+  timeout: COLD_START_TIMEOUT,
 })
 
 function unwrapError(error) {
@@ -33,10 +37,21 @@ function unwrapError(error) {
     return detail.map((d) => `${d.loc?.at(-1)}: ${d.msg}`).join('; ')
   }
   if (typeof detail === 'string') return detail
+  if (error?.code === 'ECONNABORTED') {
+    return 'The backend is still waking up (Render free tier sleeps when idle). Please try once more.'
+  }
   if (error?.response?.status === 404) {
-    return `No endpoint found at ${API_URL}/api/predict. Check that VITE_API_URL points at the Render backend root.`
+    return `No endpoint at ${API_URL}/api/predict. Check VITE_API_URL points at the Render root.`
   }
   return error.message || 'Something went wrong talking to the CrediAI API.'
+}
+
+/**
+ * Fire-and-forget ping that starts the Render cold boot early, while the user
+ * is still filling in the form. Never throws.
+ */
+export function wakeBackend() {
+  client.get('/api/health').catch(() => {})
 }
 
 export async function checkHealth() {
@@ -49,6 +64,16 @@ export async function predictCreditScore(features) {
     const res = await client.post('/api/predict', features)
     return res.data
   } catch (error) {
+    // A timeout on the first attempt usually means the instance was asleep but
+    // is now booting. One retry lands on a warm server.
+    if (error?.code === 'ECONNABORTED') {
+      try {
+        const res = await client.post('/api/predict', features)
+        return res.data
+      } catch (retryError) {
+        throw new Error(unwrapError(retryError))
+      }
+    }
     throw new Error(unwrapError(error))
   }
 }
@@ -78,4 +103,4 @@ export async function fetchDemoApplicants() {
   return res.data
 }
 
-export { API_URL }
+export { API_URL, API_CLIENT_VERSION }

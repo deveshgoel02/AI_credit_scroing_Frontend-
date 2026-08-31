@@ -8,6 +8,14 @@ import Landing from './pages/Landing'
 import ModelMonitoring from './pages/ModelMonitoring'
 import ResponsibleAI from './pages/ResponsibleAI'
 import Result from './pages/Result'
+import { useEffect } from 'react'
+import { wakeBackend } from './services/api'
+
+export default function App() {
+  useEffect(() => {
+    wakeBackend()
+  }, [])
+  // ...rest unchanged
 
 export default function App() {
   return (
